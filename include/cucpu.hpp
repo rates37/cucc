@@ -3,7 +3,10 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
+#include <unordered_map>
+#include <vector>
 
 namespace cucpu {
 
@@ -70,6 +73,7 @@ inline cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
 // Allows a fixed number of threads to synchronise repeatedly
 // without risking race conditions between consecutive cycles
 class Barrier {
+public:
   Barrier(unsigned int total_threads)
       : total_threads_(total_threads), threads_remaining_(total_threads),
         generation_(0) {}
@@ -109,4 +113,55 @@ private:
   std::mutex mutex_;
   std::condition_variable cv_;
 };
+
+//! Per-block context: Barrier + shared block memory
+struct BlockContext {
+  Barrier *barrier = nullptr;
+  // guard access to shared memory
+  std::mutex shared_mem_mutex;
+  // map unique ID to memory addr
+  std::unordered_map<int, void *> shared_mem;
+  // list of cleanup functions to properly call destructors
+  std::vector<std::function<void()>> deleters;
+
+  ~BlockContext() {
+    // ensure all allocated shared memory is correctly cleaned
+    for (auto &d : deleters)
+      d();
+  }
+};
+
+inline thread_local BlockContext *current_thread_block = nullptr;
+
+// Variables that are __shared__ resolve to a per-block object, allocated once
+// by whichever thread reaches the declaration first, and shared by all of the
+// threads in the block. The `id` is a unique tag the transpiler should assign
+template <class T> T &shared_var(int id) {
+  BlockContext *bc = current_thread_block;
+  std::lock_guard<std::mutex> lock(bc->shared_mem_mutex);
+
+  // Check if the variable has already been allocated by another thread
+  auto it = bc->shared_mem.find(id);
+  if (it != bc->shared_mem.end())
+    return *static_cast<T *>(it->second);
+
+  // allocate the variable
+  T *p = new T();
+  bc->shared_mem.emplace(id, static_cast<void *>(p));
+
+  // capture the pointer so it can be correctly deleted during the BlockContext
+  // destructor invocation
+  bc->deleters.push_back([p] { delete p; });
+  return *p;
+}
+
+// block synchronisation barrier, emulates CUDA's `__syncthreads()`
+// Blocks all threads in the active block until they have all arrived at this
+// point.
+inline void syncthreads() {
+  if (current_thread_block && current_thread_block->barrier) {
+    current_thread_block->barrier->wait();
+  }
+}
+
 } // namespace cucpu
