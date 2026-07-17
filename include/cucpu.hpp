@@ -5,6 +5,21 @@
 
 namespace cucpu {
 
+//! dim3 (grid/block dimension type)
+struct dim3 {
+    unsigned x, y, z;
+
+    dim3(unsigned x_ = 1, unsigned y_ = 1, unsigned z_ = 1): x(x_), y(y_), z(z_) {}
+};
+
+
+// built in variables:
+//  this emulation uses thread local globals that will be set before each thread runs
+inline thread_local dim3 threadIdx;
+inline thread_local dim3 blockIdx;
+inline thread_local dim3 blockDim;
+inline thread_local dim3 gridDim;
+
 //! host / device memory primitives
 /**
     Since this is designed to purely run on CPU, there is only one address
