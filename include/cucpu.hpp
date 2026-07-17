@@ -7,14 +7,15 @@ namespace cucpu {
 
 //! dim3 (grid/block dimension type)
 struct dim3 {
-    unsigned x, y, z;
+  unsigned x, y, z;
 
-    dim3(unsigned x_ = 1, unsigned y_ = 1, unsigned z_ = 1): x(x_), y(y_), z(z_) {}
+  dim3(unsigned x_ = 1, unsigned y_ = 1, unsigned z_ = 1)
+      : x(x_), y(y_), z(z_) {}
 };
 
-
 // built in variables:
-//  this emulation uses thread local globals that will be set before each thread runs
+//  this emulation uses thread local globals that will be set before each thread
+//  runs
 inline thread_local dim3 threadIdx;
 inline thread_local dim3 blockIdx;
 inline thread_local dim3 blockDim;
@@ -50,17 +51,16 @@ cudaError_t cudaFree(void *p) {
   return cudaSuccess;
 }
 
-cudaError_t cudaMemcpy(void *dst, const void* src, size_t n, cudaMemCpyKind _mode) {
-    std::memcpy(dst,src, n);
-    return cudaSuccess;
+cudaError_t cudaMemcpy(void *dst, const void *src, size_t n,
+                       cudaMemCpyKind _mode) {
+  std::memcpy(dst, src, n);
+  return cudaSuccess;
 }
 
 cudaError_t cudaMemset(void *p, int v, size_t n) {
-    std::memset(p, v, n);
-    return cudaSuccess;
+  std::memset(p, v, n);
+  return cudaSuccess;
 }
 
-cudaError_t cudaDeviceSynchronize() {
-    return cudaSuccess;
-}
+cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
 } // namespace cucpu
