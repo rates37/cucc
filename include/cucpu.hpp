@@ -1,7 +1,9 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 namespace cucpu {
 
@@ -52,7 +54,7 @@ inline cudaError_t cudaFree(void *p) {
 }
 
 inline cudaError_t cudaMemcpy(void *dst, const void *src, size_t n,
-                       cudaMemCpyKind _mode) {
+                              cudaMemCpyKind _mode) {
   std::memcpy(dst, src, n);
   return cudaSuccess;
 }
@@ -63,4 +65,48 @@ inline cudaError_t cudaMemset(void *p, int v, size_t n) {
 }
 
 inline cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
+
+//! Barrier (for synchronisation)
+// Allows a fixed number of threads to synchronise repeatedly
+// without risking race conditions between consecutive cycles
+class Barrier {
+  Barrier(unsigned int total_threads)
+      : total_threads_(total_threads), threads_remaining_(total_threads),
+        generation_(0) {}
+
+  // blocks the calling thread until all expected threads arrive
+  void wait() {
+    std::unique_lock<std::mutex> lock(
+        mutex_); // local lock, gets destroyed upon method return/exit by
+                 // destructor (RAII)
+
+    // get current generation
+    // this lets the local thread know when a new cycle has begun
+    unsigned int current_generation = generation_;
+
+    // the final thread to finish triggers the transition:
+    if (--threads_remaining_ == 0) {
+      // advance to next generation:
+      generation_++;
+
+      // reset counter for next generation:
+      threads_remaining_ = total_threads_;
+
+      // signal all other threads:
+      cv_.notify_all();
+    } else {
+      // wait until last thread notifies:
+      cv_.wait(lock, [this, current_generation] {
+        return current_generation != generation_;
+      });
+    }
+  }
+
+private:
+  const unsigned int total_threads_;
+  unsigned int threads_remaining_;
+  unsigned int generation_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+};
 } // namespace cucpu
