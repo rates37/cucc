@@ -40,27 +40,27 @@ using cudaError_t = int;
 constexpr cudaError_t cudaSuccess = 0;
 constexpr cudaError_t cudaMallocFail = 1;
 
-cudaError_t cudaMalloc(void **p, size_t sz) {
+inline cudaError_t cudaMalloc(void **p, size_t sz) {
   *p = std::malloc(sz);
   return *p ? cudaSuccess : cudaMallocFail;
 }
 
-cudaError_t cudaFree(void *p) {
+inline cudaError_t cudaFree(void *p) {
   if (p)
     std::free(p);
   return cudaSuccess;
 }
 
-cudaError_t cudaMemcpy(void *dst, const void *src, size_t n,
+inline cudaError_t cudaMemcpy(void *dst, const void *src, size_t n,
                        cudaMemCpyKind _mode) {
   std::memcpy(dst, src, n);
   return cudaSuccess;
 }
 
-cudaError_t cudaMemset(void *p, int v, size_t n) {
+inline cudaError_t cudaMemset(void *p, int v, size_t n) {
   std::memset(p, v, n);
   return cudaSuccess;
 }
 
-cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
+inline cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
 } // namespace cucpu
