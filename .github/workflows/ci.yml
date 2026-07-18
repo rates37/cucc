@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Show Toolchain versions
+        run: |
+          g++ --version
+          python3 --version
+
+      - name: Run Tests
+        run: make test
