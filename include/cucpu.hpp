@@ -149,7 +149,7 @@ inline thread_local BlockContext *current_thread_block = nullptr;
 // Variables that are __shared__ resolve to a per-block object, allocated once
 // by whichever thread reaches the declaration first, and shared by all of the
 // threads in the block. The `id` is a unique tag the transpiler should assign
-template <class T> T &shared_var(int id) {
+template <class T> T &get_shared_variable(int id) {
   BlockContext *bc = current_thread_block;
   std::lock_guard<std::mutex> lock(bc->shared_mem_mutex);
 
