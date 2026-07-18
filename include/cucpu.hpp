@@ -106,7 +106,7 @@ template <class T> inline T atomicMax(T *address, T val) {
 template <class T> inline T atomicMin(T *address, T val) {
   std::atomic_ref<T> ref(*address);
   T old = ref.load();
-  while (val < old && ref.compare_exchange_weak(old, val)) {
+  while (val < old && !ref.compare_exchange_weak(old, val)) {
   }
   return old;
 }
