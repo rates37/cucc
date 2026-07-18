@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+#!/bin/bash
+
 # cucc: compiler driver for CUDA Universal CPU Compiler toolchain
 # Usage: cucc program.cu -o program [extra g++ flags...]
 set -euo pipefail
