@@ -6,7 +6,9 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cucpu {
@@ -20,12 +22,12 @@ struct dim3 {
 };
 
 // index helpers:
-inline dim3 lin_to_dim(unsigned int id,dim3 d) {
-    dim3 r;
-    r.x = id % d.x;
-    r.y = (id / d.x) % d.y;
-    r.z = id / (d.x * d.y);
-    return r;
+inline dim3 lin_to_dim(unsigned int id, dim3 d) {
+  dim3 r;
+  r.x = id % d.x;
+  r.y = (id / d.x) % d.y;
+  r.z = id / (d.x * d.y);
+  return r;
 }
 
 // built in variables:
@@ -179,39 +181,116 @@ inline void syncthreads() {
 // a specified number of thread blocks (`total_blocks`)
 // Uses a thread-pool patter, where OS-level workers dynamically pull
 // block IDs off of a lock-free global atomic queue
-template<class KernelFunction>
+template <class KernelFunction>
 void parallel_for_blocks(unsigned int total_blocks, KernelFunction f) {
-    if (total_blocks == 0)
-        return;
+  if (total_blocks == 0)
+    return;
 
-    // determine optimal concurrency, based on available CPU cores:
-    unsigned int hardware_cores = std::thread::hardware_concurrency();
-    if (hardware_cores == 0) {
-        hardware_cores = 4; // if above call fails, use 4 as a fallback
+  // determine optimal concurrency, based on available CPU cores:
+  unsigned int hardware_cores = std::thread::hardware_concurrency();
+  if (hardware_cores == 0) {
+    hardware_cores = 4; // if above call fails, use 4 as a fallback
+  }
+
+  // clip bounds at total blocks:
+  unsigned int worker_count = std::min(hardware_cores, total_blocks);
+
+  // counter (queue) to track next block ID to be run:
+  std::atomic<unsigned int> next_block_id{0};
+  std::vector<std::thread> workers;
+  workers.reserve(worker_count);
+
+  // create workers:
+  for (unsigned int idx = 0; idx < worker_count; idx++) {
+    workers.emplace_back([&] {
+      unsigned int current_id;
+      while ((current_id = next_block_id.fetch_add(1)) < total_blocks) {
+        f(current_id);
+      }
+    });
+  }
+
+  // block until all workers finish:
+  for (auto &t : workers) {
+    t.join();
+  }
+}
+
+//! fast launch engine:
+// run a grid of blocks concurrently across pool of workers
+// doesn't support `__syncthreads()`  because there is no concurrent
+// co-scheduling of threads within a block
+template <class KernelFunction, class... KernelArgs>
+void launch_fast(KernelFunction f, dim3 grid_dims, dim3 block_dims,
+                 KernelArgs... args) {
+  // pack args into tuple (for std::apply usage)
+  auto args_tuple = std::make_tuple(args...);
+
+  // flatten 3D grid and block structures into linear totals:
+  unsigned int total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
+  unsigned int threads_per_block = block_dims.x * block_dims.y * block_dims.z;
+
+  // distribute evenly:
+  parallel_for_blocks(total_blocks, [&](unsigned int linear_block_id) {
+    blockIdx = lin_to_dim(linear_block_id, grid_dims);
+    blockDim = block_dims;
+    gridDim = grid_dims;
+
+    for (unsigned int id = 0; id < threads_per_block; ++id) {
+      threadIdx = lin_to_dim(id, blockDim);
+      std::apply(f, args_tuple);
     }
+  });
+}
 
-    // clip bounds at total blocks:
-    unsigned int worker_count = std::min(hardware_cores, total_blocks);
+//! cooperative launch engine
+// one OS thread per simulated CUDA thread within each block
+// Threads within the same block share a common stack-allocated Barrier
+// and BlockContext. This supports concurrent execution primitives like
+// `__syncthreads()` and `__shared__` memory.
+template <class KernelFunction, class... KernelArgs>
+void launch_cooperative(KernelFunction f, dim3 grid_dims, dim3 block_dims,
+                        KernelArgs... args) {
+  auto args_tuple = std::make_tuple(args...);
 
-    // counter (queue) to track next block ID to be run:
-    std::atomic<unsigned int> next_block_id{0};
-    std::vector<std::thread> workers;
-    workers.reserve(worker_count);
+  // flatten 3D grid and block structures into linear totals:
+  unsigned int total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
+  unsigned int threads_per_block = block_dims.x * block_dims.y * block_dims.z;
 
-    // create workers:
-    for (unsigned int idx = 0; idx < worker_count; idx++) {
-        workers.emplace_back([&] {
-            unsigned int current_id;
-            while ((current_id = next_block_id.fetch_add(1)) < total_blocks) {
-                f(current_id);
-            }
-        });
+  parallel_for_blocks(total_blocks, [&](unsigned int linear_block_id) {
+    //
+    dim3 current_block_idx = lin_to_dim(linear_block_id, grid_dims);
+
+    // allocate block-wide barrier and context on this worker thread's stack:
+    Barrier block_barrier(threads_per_block);
+    BlockContext context;
+    context.barrier = &block_barrier;
+    std::vector<std::thread> block_threads;
+    block_threads.reserve(threads_per_block);
+
+    // spawn OS thread for every thread in this block:
+    for (unsigned int linear_thread_id = 0;
+         linear_thread_id < threads_per_block; linear_thread_id++) {
+
+      // capture linear_thread_id by VALUE, rest by reference
+      block_threads.emplace_back([&, linear_thread_id] {
+        threadIdx = lin_to_dim(linear_thread_id, block_dims);
+        blockIdx = current_block_idx;
+        blockDim = block_dims;
+        gridDim = grid_dims;
+
+        // link this thread to the shared block context (to allow for
+        // get_shared_variable and syncthreads)
+        current_thread_block = &context;
+
+        std::apply(f, args_tuple);
+      });
     }
-
-    // block until all workers finish:
-    for (auto& t: workers) {
-        t.join();
+    // wait for all threads to finish:
+    for (auto &t : block_threads) {
+      t.join();
     }
+  });
 }
 
 } // namespace cucpu
