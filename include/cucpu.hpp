@@ -48,7 +48,7 @@ inline thread_local dim3 gridDim;
  */
 enum cudaMemCpyKind {
   cudaMemcpyHostToDevice,
-  cudaMemcpyToDeviceHost,
+  cudaMemcpyDeviceToHost,
   cudaMemcpyDeviceToDevice,
   cudaMemcpyHostToHost,
 };
