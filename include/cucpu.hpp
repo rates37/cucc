@@ -14,9 +14,18 @@ namespace cucpu {
 struct dim3 {
   unsigned x, y, z;
 
-  dim3(unsigned x_ = 1, unsigned y_ = 1, unsigned z_ = 1)
+  dim3(unsigned int x_ = 1, unsigned int y_ = 1, unsigned int z_ = 1)
       : x(x_), y(y_), z(z_) {}
 };
+
+// index helpers:
+inline dim3 lin_to_dim(unsigned int id,dim3 d) {
+    dim3 r;
+    r.x = id % d.x;
+    r.y = (id / d.x) % d.y;
+    r.z = id / (d.x * d.y);
+    return r;
+}
 
 // built in variables:
 //  this emulation uses thread local globals that will be set before each thread
