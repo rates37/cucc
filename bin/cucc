@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# cucc: compiler driver for CUDA Universal CPU Compiler toolchain
+# Usage: cucc program.cu -o program [extra g++ flags...]
+set -euo pipefail
+
+# get the path to the include directory:
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+readonly INCLUDE_DIR="$PROJECT_ROOT/include"
+
+source_file=""
+output_executable="a.out"
+passthrough_flags=()
+
+while [[ $# -gt 0 ]]; do # iterate over args
+  case "$1" in
+    -o)
+      output_executable="$2"
+      shift 2
+      ;;
+    *.cu)
+      source_file="$1"
+      shift
+      ;;
+    *)
+      passthrough_flags+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# validate that a source file was provided:
+if [[ -z "$source_file" ]]; then
+  echo "Error: No .cu input file provided to cucc" >&2
+  exit 1
+fi
+
+# Create a secured temporary file for the transpiled C++ intermediate code
+temp_cpp_file="$(mktemp "${TMPDIR:-/tmp}/cucpu_XXXXXX.cpp")"
+trap 'rm -f "$temp_cpp_file"' EXIT # always remove file on exit
+
+# transpile:
+python3 "$SCRIPT_DIR/transpile.py" "$source_file" "$temp_cpp_file"
+
+# compile with g++:
+g++ -std=c++17 -pthread \
+    -I"$INCLUDE_DIR" \
+    "$temp_cpp_file" \
+    -o "$output_executable" \
+    ${passthrough_flags[@]+"${passthrough_flags[@]}"}
