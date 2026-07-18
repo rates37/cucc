@@ -82,6 +82,44 @@ inline cudaError_t cudaMemset(void *p, int v, size_t n) {
 
 inline cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
 
+//! Atomic device intrinsics
+// atomicAdd/atomicSub/etc are __device__ free functions that operate on either
+// global or shared memory. These operations need to be atomic because parallel
+// threads may otherwise introduce race conditions. Here using std::atomic_ref
+// which gives atomic access to non-owned memory.
+template <class T> inline T atomicAdd(T *address, T val) {
+  return std::atomic_ref<T>(*address).fetch_add(val);
+}
+
+template <class T> inline T atomicSub(T *address, T val) {
+  return std::atomic_ref<T>(*address).fetch_sub(val);
+}
+
+template <class T> inline T atomicMax(T *address, T val) {
+  std::atomic_ref<T> ref(*address);
+  T old = ref.load();
+  while (val > old && !ref.compare_exchange_weak(old, val)) {
+  }
+  return old;
+}
+
+template <class T> inline T atomicMin(T *address, T val) {
+  std::atomic_ref<T> ref(*address);
+  T old = ref.load();
+  while (val < old && ref.compare_exchange_weak(old, val)) {
+  }
+  return old;
+}
+
+template <class T> inline T atomicExch(T *address, T val) {
+  return std::atomic_ref<T>(*address).exchange(val);
+}
+
+template <class T> inline T atomicCAS(T *address, T compare, T val) {
+  std::atomic_ref<T>(*address).compare_exchange_strong(compare, val);
+  return compare;
+}
+
 //! Barrier (for synchronisation)
 // Allows a fixed number of threads to synchronise repeatedly
 // without risking race conditions between consecutive cycles

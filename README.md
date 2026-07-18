@@ -6,7 +6,7 @@ Write kernels that *read* like CUDA, compile them with `cucc`, and run a a norma
 
 ## Requirements:
 
-* A C++ compiler with C++17 support
+* A C++ compiler with C++20 support
 * Python3
 
 
