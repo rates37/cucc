@@ -1,0 +1,54 @@
+// Grid-wide sum reduction. Each block reduces its slice in __shared__ memory
+// (cooperative path: __shared__ + __syncthreads()), then accumulates its
+// partial into a single global counter with atomicAdd. Exercises both the
+// cooperative launch engine and atomic device intrinsics.
+//
+// Expected output: "523776"
+//   sum of 0-1023 = 1023 * 1024 / 2 = 523776
+#include <cstdio>
+
+#define BLOCK 256
+
+__global__ void reduce_sum(const int *in, int *out, int n) {
+  __shared__ int buf[BLOCK];
+  int t = threadIdx.x;
+  int i = blockIdx.x * blockDim.x + t;
+
+  buf[t] = (i < n) ? in[i] : 0;
+  __syncthreads();
+
+  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (t < s)
+      buf[t] += buf[t + s];
+    __syncthreads();
+  }
+
+  if (t == 0)
+    atomicAdd(out, buf[0]);
+}
+
+int main() {
+  const int n = 1024;
+  int h[1024];
+  for (int i = 0; i < n; i++)
+    h[i] = i;
+
+  int *din, *dout;
+  cudaMalloc((void **)&din, n * sizeof(int));
+  cudaMalloc((void **)&dout, sizeof(int));
+  cudaMemcpy(din, h, n * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemset(dout, 0, sizeof(int));
+
+  const int threads = BLOCK;
+  const int blocks = (n + threads - 1) / threads;
+  reduce_sum<<<blocks, threads>>>(din, dout, n);
+  cudaDeviceSynchronize();
+
+  int r = 0;
+  cudaMemcpy(&r, dout, sizeof(int), cudaMemcpyDeviceToHost);
+  std::printf("%d\n", r);
+
+  cudaFree(din);
+  cudaFree(dout);
+  return 0;
+}

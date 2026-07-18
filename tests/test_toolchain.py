@@ -67,6 +67,27 @@ class CooperativePathTests(unittest.TestCase):
         out = compile_and_run(os.path.join(FIXTURES_DIR, "block_reduce.cu"))
         self.assertEqual(out.split(), ["28", "92"])
 
+class GeneralKernelTests(unittest.TestCase):
+    def test_histogram(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "histogram.cu"))
+        self.assertEqual(out.split(), ["100"]*10)
+
+    def test_reduction(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "reduction.cu"))
+        self.assertEqual(out.split(), ["523776"])
+
+    def test_scan(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "scan.cu"))
+        self.assertEqual(out.split(), ["1", "128", "256"])
+
+    def test_stencil(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "stencil.cu"))
+        self.assertEqual(out.split(), ["stencil:", "OK"])
+
+    def test_transpose(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "transpose.cu"))
+        self.assertEqual(out.split(), ["transpose:", "OK"])
+
 
 @unittest.skipUnless(heavy_enabled(), "heavy test, set CUCC_RUN_HEAVY=1 to enable")
 class StressTests(unittest.TestCase):
