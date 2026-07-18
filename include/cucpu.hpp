@@ -5,6 +5,7 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -171,6 +172,46 @@ inline void syncthreads() {
   if (current_thread_block && current_thread_block->barrier) {
     current_thread_block->barrier->wait();
   }
+}
+
+//! parallel block executor:
+// emulate GPU grid execution by running a kernel function, `f` across
+// a specified number of thread blocks (`total_blocks`)
+// Uses a thread-pool patter, where OS-level workers dynamically pull
+// block IDs off of a lock-free global atomic queue
+template<class KernelFunction>
+void parallel_for_blocks(unsigned int total_blocks, KernelFunction f) {
+    if (total_blocks == 0)
+        return;
+
+    // determine optimal concurrency, based on available CPU cores:
+    unsigned int hardware_cores = std::thread::hardware_concurrency();
+    if (hardware_cores == 0) {
+        hardware_cores = 4; // if above call fails, use 4 as a fallback
+    }
+
+    // clip bounds at total blocks:
+    unsigned int worker_count = std::min(hardware_cores, total_blocks);
+
+    // counter (queue) to track next block ID to be run:
+    std::atomic<unsigned int> next_block_id{0};
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+
+    // create workers:
+    for (unsigned int idx = 0; idx < worker_count; idx++) {
+        workers.emplace_back([&] {
+            unsigned int current_id;
+            while ((current_id = next_block_id.fetch_add(1)) < total_blocks) {
+                f(current_id);
+            }
+        });
+    }
+
+    // block until all workers finish:
+    for (auto& t: workers) {
+        t.join();
+    }
 }
 
 } // namespace cucpu
