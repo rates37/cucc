@@ -6,8 +6,10 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -187,6 +189,10 @@ inline thread_local BlockContext *current_thread_block = nullptr;
 // Variables that are __shared__ resolve to a per-block object, allocated once
 // by whichever thread reaches the declaration first, and shared by all of the
 // threads in the block. The `id` is a unique tag the transpiler should assign
+//
+// The transpiler emits the natural C array type for array declarations
+// e.g., `__shared__ int buf[8]` -> `get_shared_variable<int[8]>`
+// so T here is an array type which decays to a pointer
 template <class T> T &get_shared_variable(int id) {
   BlockContext *bc = current_thread_block;
   std::lock_guard<std::mutex> lock(bc->shared_mem_mutex);
@@ -197,12 +203,24 @@ template <class T> T &get_shared_variable(int id) {
     return *static_cast<T *>(it->second);
 
   // allocate the variable
-  T *p = new T();
+  T *p;
+  if constexpr (std::is_trivial_v<T>) {
+    // trivial types including C arrays get raw aligned storage
+    // and is zero-initialised
+    void *raw = ::operator new(sizeof(T), std::align_val_t(alignof(T)));
+    std::memset(raw, 0, sizeof(T));
+    p = static_cast<T *>(raw);
+    // store deleter
+    bc->deleters.push_back(
+        [raw] { ::operator delete(raw, std::align_val_t(alignof(T))); });
+  } else {
+    // non array class keep normal construction/destruction
+    p = new T();
+    // capture the pointer so it can be correctly deleted during the
+    // BlockContext destructor invocation
+    bc->deleters.push_back([p] { delete p; });
+  }
   bc->shared_mem.emplace(id, static_cast<void *>(p));
-
-  // capture the pointer so it can be correctly deleted during the BlockContext
-  // destructor invocation
-  bc->deleters.push_back([p] { delete p; });
   return *p;
 }
 

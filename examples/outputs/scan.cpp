@@ -26,19 +26,17 @@ using namespace cucpu;
 #define N 256
 
 __global__ void scan_inclusive(const int *in, int *out, int n) {
-  auto& a = ::cucpu::get_shared_variable<std::array<int, N>>(1);
-  auto& b = ::cucpu::get_shared_variable<std::array<int, N>>(2);
+  auto& a = ::cucpu::get_shared_variable<int[N]>(1);
+  auto& b = ::cucpu::get_shared_variable<int[N]>(2);
   int t = threadIdx.x;
 
   a[t] = in[t];
   __syncthreads();
 
   // Ping-pong between the two buffers, doubling the offset each step.
-  // Note: need to address the arrays via &x[0] rather than relying on array-to-pointer
-  // decay -- __shared__ arrays are lowered to std::array, which does not decay.
-  // this needs to be fixed (ideally)
-  int *src = &a[0];
-  int *dst = &b[0];
+  // auto& int = ::cucpu::get_shared_variable<arrays decay to pointers just like a real CUDA[N]>(3);
+  int *src = a;
+  int *dst = b;
   for (int offset = 1; offset < n; offset <<= 1) {
     if (t >= offset)
       dst[t] = src[t] + src[t - offset];

@@ -34,20 +34,27 @@ class RewriteSharedMemoryTests(unittest.TestCase):
         out = T.rewrite_shared_memory("__shared__ int buf[8];")
         self.assertEqual(
             out,
-            "auto& buf = ::cucpu::get_shared_variable<std::array<int, 8>>(1);",
+            "auto& buf = ::cucpu::get_shared_variable<int[8]>(1);",
         )
 
-    def test_multidim_array_nests_outer_first(self):
+    def test_multidim_array_preserves_dim_order(self):
         out = T.rewrite_shared_memory("__shared__ float matrix[16][32];")
         self.assertEqual(
             out,
-            "auto& matrix = ::cucpu::get_shared_variable<std::array<std::array<float, 32>, 16>>(1);",
+            "auto& matrix = ::cucpu::get_shared_variable<float[16][32]>(1);",
+        )
+    
+    def test_scalar_shared_has_no_array_suffix(self):
+        out = T.rewrite_shared_memory("__shared__ int total;")
+        self.assertEqual(
+            out,
+            "auto& total = ::cucpu::get_shared_variable<int>(1);"
         )
 
     def test_unique_ids_are_assigned(self):
         out = T.rewrite_shared_memory("__shared__ int a[2]; __shared__ int b[2];")
-        self.assertIn(">>(1);", out)
-        self.assertIn(">>(2);", out)
+        self.assertIn("<int[2]>(1);", out)
+        self.assertIn("<int[2]>(2);", out)
 
 
 class RewriteKernelLaunchesTests(unittest.TestCase):

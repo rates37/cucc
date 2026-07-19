@@ -25,7 +25,7 @@ using namespace cucpu;
 #define BLOCK 256
 
 __global__ void reduce_sum(const int *in, int *out, int n) {
-  auto& buf = ::cucpu::get_shared_variable<std::array<int, BLOCK>>(1);
+  auto& buf = ::cucpu::get_shared_variable<int[BLOCK]>(1);
   int t = threadIdx.x;
   int i = blockIdx.x * blockDim.x + t;
 

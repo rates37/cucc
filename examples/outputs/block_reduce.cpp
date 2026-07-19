@@ -22,7 +22,7 @@ using namespace cucpu;
 #include <cstdio>
 
 __global__ void block_reduce(const int *in, int *out) {
-  auto& buf = ::cucpu::get_shared_variable<std::array<int, 8>>(1);
+  auto& buf = ::cucpu::get_shared_variable<int[8]>(1);
   int t = threadIdx.x;
   buf[t] = in[blockIdx.x * blockDim.x + t];
   __syncthreads();

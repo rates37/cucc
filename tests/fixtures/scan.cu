@@ -19,11 +19,9 @@ __global__ void scan_inclusive(const int *in, int *out, int n) {
   __syncthreads();
 
   // Ping-pong between the two buffers, doubling the offset each step.
-  // Note: need to address the arrays via &x[0] rather than relying on array-to-pointer
-  // decay -- __shared__ arrays are lowered to std::array, which does not decay.
-  // this needs to be fixed (ideally)
-  int *src = &a[0];
-  int *dst = &b[0];
+  // __shared__ arrays decay to pointers just like a real CUDA int[N];
+  int *src = a;
+  int *dst = b;
   for (int offset = 1; offset < n; offset <<= 1) {
     if (t >= offset)
       dst[t] = src[t] + src[t - offset];

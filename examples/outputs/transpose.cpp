@@ -14,7 +14,7 @@ using namespace cucpu;
 #define __syncthreads() ::cucpu::syncthreads()
 // =======================
 // Tiled matrix transpose using 2D __shared__ memory. Exercises multidimensional
-// __shared__ arrays (rewritten to nested std::array), 2D indexing, and
+// __shared__ arrays (rewritten to native C arrays), 2D indexing, and
 // __syncthreads() so this runs on the cooperative launch engine.
 //
 // The kernel result is checked against a serial CPU reference inside main().

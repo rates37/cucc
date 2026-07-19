@@ -100,8 +100,10 @@ def scan_for_kernels(source_code: str) -> dict[str, bool]:
 
 
 def rewrite_shared_memory(source_code: str) -> str:
-    """Converts C-style multidimensional __share__ arrays into flat references
-    using std::array nesting
+    """Converts C-style multidimensional __share__ arrays into a per-block shared object
+    preserving the C array type. Using a native array type (instead of a std::array), lets
+    the reference decay into a pointer (just like real CUDA shared memory), so `int *p = buf`
+    works as expected.
 
     Args:
         source_code (str): The raw source code to convert
@@ -111,15 +113,9 @@ def rewrite_shared_memory(source_code: str) -> str:
 
     Example:
     >>> rewrite_shared_memory("__shared__ float matrix[16][32];")
-    auto& matrix = ::cucpu::get_shared_variable<std::array<std::array<float, 32>, 16>>(1);
+    auto& matrix = ::cucpu::get_shared_variable<float[16][32]>(1);
     """
     unique_id_counter = 0
-
-    def generate_nested_std_array(base_type: str, dims: list[str]) -> str:
-        nested_type = base_type.strip()
-        for d in reversed(dims):
-            nested_type = f"std::array<{nested_type}, {d}>"
-        return nested_type
 
     # regex to get datatype, variable label, and array bracket sequence:
     shared_regex = re.compile(
@@ -131,7 +127,8 @@ def rewrite_shared_memory(source_code: str) -> str:
         base_type, var_name, raw_dims = m.group(1), m.group(2), m.group(3)
         extracted_dims = re.findall(r"\[([^\]]*)\]", raw_dims)
         unique_id_counter += 1
-        cpp_type = generate_nested_std_array(base_type, extracted_dims)
+        array_suffix = "".join(f"[{d}]" for d in extracted_dims)
+        cpp_type = f"{base_type.strip()}{array_suffix}"
         return f"auto& {var_name} = ::cucpu::get_shared_variable<{cpp_type}>({unique_id_counter});"
 
     return shared_regex.sub(replace_match_handler, source_code)

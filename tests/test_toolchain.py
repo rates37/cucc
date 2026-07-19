@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests._util import CUCC, EXAMPLES_DIR, FIXTURES_DIR, heavy_enabled
+from tests._util import CUCC, FIXTURES_DIR, heavy_enabled
 
 
 def compile_and_run(source_path, run_args=None, timeout=60):
@@ -67,10 +67,11 @@ class CooperativePathTests(unittest.TestCase):
         out = compile_and_run(os.path.join(FIXTURES_DIR, "block_reduce.cu"))
         self.assertEqual(out.split(), ["28", "92"])
 
+
 class GeneralKernelTests(unittest.TestCase):
     def test_histogram(self):
         out = compile_and_run(os.path.join(FIXTURES_DIR, "histogram.cu"))
-        self.assertEqual(out.split(), ["100"]*10)
+        self.assertEqual(out.split(), ["100"] * 10)
 
     def test_reduction(self):
         out = compile_and_run(os.path.join(FIXTURES_DIR, "reduction.cu"))
@@ -87,6 +88,30 @@ class GeneralKernelTests(unittest.TestCase):
     def test_transpose(self):
         out = compile_and_run(os.path.join(FIXTURES_DIR, "transpose.cu"))
         self.assertEqual(out.split(), ["transpose:", "OK"])
+
+    def test_shared_decay(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "shared_decay.cu"))
+        self.assertEqual(
+            out.split(),
+            [
+                "7",
+                "6",
+                "5",
+                "4",
+                "3",
+                "2",
+                "1",
+                "0",
+                "15",
+                "14",
+                "13",
+                "12",
+                "11",
+                "10",
+                "9",
+                "8",
+            ],
+        )
 
 
 @unittest.skipUnless(heavy_enabled(), "heavy test, set CUCC_RUN_HEAVY=1 to enable")

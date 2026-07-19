@@ -1,0 +1,49 @@
+// Regression fixture for __shared__ array-to-pointer decay. A shared array must
+// behave like a real CUDA `int[N]`: it should decay to `int*` when assigned to a
+// pointer and when passed to a function expecting a pointer. Runs on the
+// cooperative engine (__shared__ + __syncthreads()).
+//
+// Each block reverses its 8-element slice via a shared buffer, reached only
+// through decayed pointers (never by indexing the array object directly).
+// Expected output: "7 6 5 4 3 2 1 0 15 14 13 12 11 10 9 8"
+#include <cstdio>
+
+__device__ void store(int *dst, int idx, int value) { dst[idx] = value; }
+
+__global__ void reverse_block(const int *in, int *out) {
+  __shared__ int buf[8];
+  int t = threadIdx.x;
+
+  // plain array-to-pointer decay (previously this failed to compile)
+  int *p = buf;
+  int base = blockIdx.x * blockDim.x;
+
+  store(p, t, in[base + t]); // pass decayed pointer to a function
+  __syncthreads();
+
+  out[base + t] = p[blockDim.x - 1 - t];
+}
+
+int main() {
+  const int blocks = 2, threads = 8, n = blocks * threads;
+  int h[16];
+  for (int i = 0; i < n; i++)
+    h[i] = i;
+
+  int *din, *dout;
+  cudaMalloc((void **)&din, n * sizeof(int));
+  cudaMalloc((void **)&dout, n * sizeof(int));
+  cudaMemcpy(din, h, n * sizeof(int), cudaMemcpyHostToDevice);
+
+  reverse_block<<<blocks, threads>>>(din, dout);
+  cudaDeviceSynchronize();
+
+  int r[16];
+  cudaMemcpy(r, dout, n * sizeof(int), cudaMemcpyDeviceToHost);
+  for (int i = 0; i < n; i++)
+    std::printf("%d%s", r[i], i + 1 < n ? " " : "\n");
+
+  cudaFree(din);
+  cudaFree(dout);
+  return 0;
+}
