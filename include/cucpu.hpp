@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -120,6 +121,43 @@ template <class T> inline T atomicExch(T *address, T val) {
 template <class T> inline T atomicCAS(T *address, T compare, T val) {
   std::atomic_ref<T>(*address).compare_exchange_strong(compare, val);
   return compare;
+}
+
+//! Math intrinsics:
+
+// reciprocal sqrt:
+inline float rsqrtf(float x) { return 1.0f / std::sqrt(x); }
+inline double rsqrtf(double x) { return 1.0 / std::sqrt(x); }
+
+// min/max:
+#define DEFINE_MIN_FUNCTION(Type)                                              \
+  inline Type min(Type a, Type b) { return a < b ? a : b; }
+
+#define DEFINE_MAX_FUNCTION(Type)                                              \
+  inline Type max(Type a, Type b) { return a > b ? a : b; }
+
+DEFINE_MIN_FUNCTION(int)
+DEFINE_MIN_FUNCTION(unsigned int)
+DEFINE_MIN_FUNCTION(long long)
+DEFINE_MIN_FUNCTION(float)
+DEFINE_MIN_FUNCTION(double)
+
+DEFINE_MAX_FUNCTION(int)
+DEFINE_MAX_FUNCTION(unsigned int)
+DEFINE_MAX_FUNCTION(long long)
+DEFINE_MAX_FUNCTION(float)
+DEFINE_MAX_FUNCTION(double)
+
+// fast-math intrinsic aliases:
+inline float __expf(float x) { return std::exp(x); }
+inline float __logf(float x) { return std::log(x); }
+inline float __log2f(float x) { return std::log2(x); }
+inline float __sinf(float x) { return std::sin(x); }
+inline float __cosf(float x) { return std::cos(x); }
+inline float __powf(float a, float b) { return std::pow(a, b); }
+inline float __fdividef(float a, float b) { return a / b; }
+inline float __saturatef(float x) {
+  return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
 }
 
 //! Barrier (for synchronisation)

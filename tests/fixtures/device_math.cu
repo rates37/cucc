@@ -1,0 +1,45 @@
+// Device math + __device__ helper fixture. Confirms that user-defined
+// __device__ functions can be called from a kernel, and the CUDA math
+// intrinsics resolve inside kernel code with no explicit include
+//
+// Per-thread result works out to a clean 2*i + 5:
+//   rsqrtf(4)*2 = 1,  expf(0) = 1,  sqrtf(i*i) = i,  max(i,3)+min(i,3) = i+3
+//   => 1 + 1 + i + (i + 3) = 2*i + 5
+// Expected output: "5 7 9 11 13 15 17 19"
+#include <cstdio>
+
+// user-defined __device__ helper called from the kernel
+__device__ int isquare(int x) { return x * x; }
+
+// exercises fmaxf/fminf/fabsf/powf; constructed to contribute exactly 0 so the
+// final result stays easy to verify.
+__device__ int zero_probe() {
+  return ((int)fmaxf(2.0f, 3.0f) - 3) + (1 - (int)fminf(4.0f, 1.0f)) +
+         ((int)fabsf(-7.0f) - 7) + ((int)powf(2.0f, 3.0f) - 8);
+}
+
+__global__ void mathk(int *out) {
+  int i = threadIdx.x;
+  int r = (int)(rsqrtf(4.0f) * 2.0f);        // 1
+  int e = (int)expf(0.0f);                    // 1
+  int s = (int)sqrtf((float)isquare(i));      // i
+  int mm = max(i, 3) + min(i, 3);             // i + 3
+  out[i] = r + e + s + mm + zero_probe();
+}
+
+int main() {
+  const int n = 8;
+  int *d;
+  cudaMalloc((void **)&d, n * sizeof(int));
+
+  mathk<<<1, n>>>(d);
+  cudaDeviceSynchronize();
+
+  int h[8];
+  cudaMemcpy(h, d, n * sizeof(int), cudaMemcpyDeviceToHost);
+  for (int i = 0; i < n; i++)
+    std::printf("%d%s", h[i], i + 1 < n ? " " : "\n");
+
+  cudaFree(d);
+  return 0;
+}

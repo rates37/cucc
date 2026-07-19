@@ -112,6 +112,13 @@ class GeneralKernelTests(unittest.TestCase):
                 "8",
             ],
         )
+    
+    def test_device_math(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "device_math.cu"))
+        self.assertEqual(
+            out.split(),
+            ["5", "7", "9", "11", "13", "15", "17", "19"]
+        )
 
 
 @unittest.skipUnless(heavy_enabled(), "heavy test, set CUCC_RUN_HEAVY=1 to enable")
