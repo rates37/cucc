@@ -359,44 +359,127 @@ inline void syncthreads() {
   }
 }
 
+//! Persistent worker pool
+// spawning/joining OS threads every kernel launch is needless overhead
+// so instead here we create a thread pool. Lazily creates its workers
+// once and reuses them for every launch
+class ThreadPool {
+public:
+  static ThreadPool &instance() {
+    static ThreadPool pool;
+    return pool;
+  }
+
+  // run task(i) for i in [0, count) across the pool until all blocks finish
+  void parallel_for(unsigned int count,
+                    const std::function<void(unsigned int)> &task) {
+    if (count == 0) {
+      return;
+    }
+
+    // publish the batch, then wake workers:
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      task_ = &task;
+      cursor_.store(0, std::memory_order_relaxed);
+      total_ = count;
+      workers_done_.store(0, std::memory_order_relaxed);
+      ++batch_;
+    }
+    cv_work_.notify_all();
+
+    // wait until every worker has drained the batch, finished, and parked
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_done_.wait(lock, [this] {
+      return workers_done_.load(std::memory_order_acquire) == worker_count_;
+    });
+    task_ = nullptr;
+  }
+
+  unsigned int size() const { return worker_count_; }
+
+private:
+  ThreadPool() {
+    worker_count_ = std::thread::hardware_concurrency();
+    if (worker_count_ == 0) {
+      worker_count_ = 4; // fallback
+    }
+    workers_.reserve(worker_count_);
+    for (unsigned int i = 0; i < worker_count_; i++) {
+      workers_.emplace_back([this] { worker_loop(); });
+    }
+  }
+
+  ~ThreadPool() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+      ++batch_; // wake the workers so they can all see the stop
+    }
+    cv_work_.notify_all();
+    for (auto &t : workers_) {
+      t.join();
+    }
+  }
+
+  void worker_loop() {
+    unsigned long long seen = 0;
+    while (true) {
+      const std::function<void(unsigned int)> *task;
+      unsigned int total;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_work_.wait(lock, [this, seen] { return stop_ || batch_ != seen; });
+        if (stop_) {
+          return;
+        }
+        seen = batch_;
+        task = task_;
+        total = total_;
+      }
+
+      // get a block and run ids until finished
+      unsigned int i;
+      while ((i = cursor_.fetch_add(1, std::memory_order_relaxed)) < total) {
+        (*task)(i);
+      }
+
+      // update that this worker has drained the batch
+      // last worker to finish wakes the caller
+      if (workers_done_.fetch_add(1, std::memory_order_acq_rel) + 1 ==
+          worker_count_) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cv_done_.notify_one();
+      }
+    }
+  }
+
+  std::vector<std::thread> workers_;
+  unsigned int worker_count_ = 0;
+
+  std::mutex mutex_;
+  std::condition_variable cv_work_; // wake workers when a batch is posted
+  std::condition_variable cv_done_; // wakes the caller when a batch completes
+
+  const std::function<void(unsigned int)> *task_ = nullptr;
+  unsigned int total_ = 0;
+  std::atomic<unsigned int> cursor_{0}; // next block ID to claim
+  std::atomic<unsigned int> workers_done_{
+      0}; // workers that have drained the current batch
+  unsigned long long batch_ = 0;
+  bool stop_ = false;
+};
+
 //! parallel block executor:
 // emulate GPU grid execution by running a kernel function, `f` across
-// a specified number of thread blocks (`total_blocks`)
-// Uses a thread-pool patter, where OS-level workers dynamically pull
-// block IDs off of a lock-free global atomic queue
+// a specified number of thread blocks (`total_blocks`) dispatched onto the
+// persistent ThreadPool
 template <class KernelFunction>
 void parallel_for_blocks(unsigned int total_blocks, KernelFunction f) {
   if (total_blocks == 0)
     return;
-
-  // determine optimal concurrency, based on available CPU cores:
-  unsigned int hardware_cores = std::thread::hardware_concurrency();
-  if (hardware_cores == 0) {
-    hardware_cores = 4; // if above call fails, use 4 as a fallback
-  }
-
-  // clip bounds at total blocks:
-  unsigned int worker_count = std::min(hardware_cores, total_blocks);
-
-  // counter (queue) to track next block ID to be run:
-  std::atomic<unsigned int> next_block_id{0};
-  std::vector<std::thread> workers;
-  workers.reserve(worker_count);
-
-  // create workers:
-  for (unsigned int idx = 0; idx < worker_count; idx++) {
-    workers.emplace_back([&] {
-      unsigned int current_id;
-      while ((current_id = next_block_id.fetch_add(1)) < total_blocks) {
-        f(current_id);
-      }
-    });
-  }
-
-  // block until all workers finish:
-  for (auto &t : workers) {
-    t.join();
-  }
+  ThreadPool::instance().parallel_for(total_blocks,
+                                      std::function<void(unsigned int)>(f));
 }
 
 //! fast launch engine:
@@ -481,14 +564,14 @@ void launch_cooperative(KernelFunction f, dim3 grid_dims, dim3 block_dims,
         // get_shared_variable and syncthreads)
         current_thread_block = &context;
 
-        // capture device-code exceptions as a launch failure. Abort the 
-        // block barrier too. Otherwise a thread that throws before a __syncthreads()
-        // would leave its peers stuck in wait()
+        // capture device-code exceptions as a launch failure. Abort the
+        // block barrier too. Otherwise a thread that throws before a
+        // __syncthreads() would leave its peers stuck in wait()
         try {
-            std::apply(f, args_tuple);
+          std::apply(f, args_tuple);
         } catch (...) {
-            detail::set_error(cudaErrorLaunchFailure);
-            block_barrier.abort();
+          detail::set_error(cudaErrorLaunchFailure);
+          block_barrier.abort();
         }
       });
     }
