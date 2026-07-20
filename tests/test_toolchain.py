@@ -119,6 +119,20 @@ class GeneralKernelTests(unittest.TestCase):
             out.split(),
             ["5", "7", "9", "11", "13", "15", "17", "19"]
         )
+    
+    def test_error_handling(self):
+        out = compile_and_run(os.path.join(FIXTURES_DIR, "error_handling.cu"))
+        self.assertEqual(
+            out.strip().splitlines(),
+            [
+                "clean=cudaSuccess",
+                "config=cudaErrorInvalidConfiguration",
+                "fastthrow=cudaErrorLaunchFailure",
+                "string=unspecified launch failure",
+                "sticky=cudaErrorLaunchFailure,cudaSuccess",
+                "coopthrow=cudaErrorLaunchFailure",
+            ]
+        )
 
 
 @unittest.skipUnless(heavy_enabled(), "heavy test, set CUCC_RUN_HEAVY=1 to enable")

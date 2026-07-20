@@ -57,13 +57,84 @@ enum cudaMemCpyKind {
   cudaMemcpyHostToHost,
 };
 
-using cudaError_t = int;
-constexpr cudaError_t cudaSuccess = 0;
-constexpr cudaError_t cudaMallocFail = 1;
+//! CUDA-aligned error codes:
+enum cudaError_t {
+  cudaSuccess = 0,
+  cudaErrorInvalidValue = 1,
+  cudaErrorMemoryAllocation = 2,
+  cudaErrorInitializationError = 3,
+  cudaErrorInvalidConfiguration = 9,
+  cudaErrorInvalidDeviceFunction = 98,
+  cudaErrorLaunchFailure = 719,
+  cudaErrorUnknown = 999
+};
+
+namespace detail {
+inline std::atomic<cudaError_t> g_last_error{cudaSuccess};
+inline void set_error(cudaError_t e) {
+  if (e != cudaSuccess)
+    g_last_error.store(e, std::memory_order_relaxed);
+}
+} // namespace detail
+
+inline cudaError_t cudaGetLastError() {
+  return detail::g_last_error.exchange(cudaSuccess, std::memory_order_relaxed);
+}
+
+inline cudaError_t cudaPeekAtLastError() {
+  return detail::g_last_error.load(std::memory_order_relaxed);
+}
+
+inline const char *cudaGetErrorName(cudaError_t e) {
+  switch (e) {
+  case cudaSuccess:
+    return "cudaSuccess";
+  case cudaErrorInvalidValue:
+    return "cudaErrorInvalidValue";
+  case cudaErrorMemoryAllocation:
+    return "cudaErrorMemoryAllocation";
+  case cudaErrorInitializationError:
+    return "cudaErrorInitializationError";
+  case cudaErrorInvalidConfiguration:
+    return "cudaErrorInvalidConfiguration";
+  case cudaErrorInvalidDeviceFunction:
+    return "cudaErrorInvalidDeviceFunction";
+  case cudaErrorLaunchFailure:
+    return "cudaErrorLaunchFailure";
+  default:
+    return "cudaErrorUnknown";
+  }
+}
+
+inline const char *cudaGetErrorString(cudaError_t e) {
+  switch (e) {
+  case cudaSuccess:
+    return "no error";
+  case cudaErrorInvalidValue:
+    return "invalid argument";
+  case cudaErrorMemoryAllocation:
+    return "out of memory";
+  case cudaErrorInitializationError:
+    return "initialization error";
+  case cudaErrorInvalidConfiguration:
+    return "invalid device configuration argument";
+  case cudaErrorInvalidDeviceFunction:
+    return "invalid device function";
+  case cudaErrorLaunchFailure:
+    return "unspecified launch failure";
+  default:
+    return "unknown error";
+  }
+}
 
 inline cudaError_t cudaMalloc(void **p, size_t sz) {
+  if (!p)
+    return detail::set_error(cudaErrorInvalidValue), cudaErrorInvalidValue;
   *p = std::malloc(sz);
-  return *p ? cudaSuccess : cudaMallocFail;
+  if (!p)
+    return detail::set_error(cudaErrorMemoryAllocation),
+           cudaErrorMemoryAllocation;
+  return cudaSuccess;
 }
 
 inline cudaError_t cudaFree(void *p) {
@@ -74,16 +145,20 @@ inline cudaError_t cudaFree(void *p) {
 
 inline cudaError_t cudaMemcpy(void *dst, const void *src, size_t n,
                               cudaMemCpyKind _mode) {
+  if (n && (!dst || !src))
+    return detail::set_error(cudaErrorInvalidValue), cudaErrorInvalidValue;
   std::memcpy(dst, src, n);
   return cudaSuccess;
 }
 
 inline cudaError_t cudaMemset(void *p, int v, size_t n) {
+  if (n && !p)
+    return detail::set_error(cudaErrorInvalidValue), cudaErrorInvalidValue;
   std::memset(p, v, n);
   return cudaSuccess;
 }
 
-inline cudaError_t cudaDeviceSynchronize() { return cudaSuccess; }
+inline cudaError_t cudaDeviceSynchronize() { return cudaPeekAtLastError(); }
 
 //! Atomic device intrinsics
 // atomicAdd/atomicSub/etc are __device__ free functions that operate on either
@@ -175,6 +250,10 @@ public:
         mutex_); // local lock, gets destroyed upon method return/exit by
                  // destructor (RAII)
 
+    // if the block was aborted (e.g., a thread threw), don't block again:
+    if (aborted_)
+      return;
+
     // get current generation
     // this lets the local thread know when a new cycle has begun
     unsigned int current_generation = generation_;
@@ -190,17 +269,26 @@ public:
       // signal all other threads:
       cv_.notify_all();
     } else {
-      // wait until last thread notifies:
+      // wait until last thread notifies, or the block is aborted
       cv_.wait(lock, [this, current_generation] {
-        return current_generation != generation_;
+        return current_generation != generation_ || aborted_;
       });
     }
+  }
+
+  // release every thread waiting on this barrier and make all future
+  // waits return immediately.
+  void abort() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    aborted_ = true;
+    cv_.notify_all();
   }
 
 private:
   const unsigned int total_threads_;
   unsigned int threads_remaining_;
   unsigned int generation_;
+  bool aborted_ = false;
   std::mutex mutex_;
   std::condition_variable cv_;
 };
@@ -325,6 +413,11 @@ void launch_fast(KernelFunction f, dim3 grid_dims, dim3 block_dims,
   unsigned int total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
   unsigned int threads_per_block = block_dims.x * block_dims.y * block_dims.z;
 
+  if (total_blocks == 0 || threads_per_block == 0) {
+    detail::set_error(cudaErrorInvalidConfiguration);
+    return;
+  }
+
   // distribute evenly:
   parallel_for_blocks(total_blocks, [&](unsigned int linear_block_id) {
     blockIdx = lin_to_dim(linear_block_id, grid_dims);
@@ -333,7 +426,12 @@ void launch_fast(KernelFunction f, dim3 grid_dims, dim3 block_dims,
 
     for (unsigned int id = 0; id < threads_per_block; ++id) {
       threadIdx = lin_to_dim(id, blockDim);
-      std::apply(f, args_tuple);
+      try {
+        std::apply(f, args_tuple);
+      } catch (...) {
+        detail::set_error(cudaErrorLaunchFailure);
+        return;
+      }
     }
   });
 }
@@ -351,6 +449,11 @@ void launch_cooperative(KernelFunction f, dim3 grid_dims, dim3 block_dims,
   // flatten 3D grid and block structures into linear totals:
   unsigned int total_blocks = grid_dims.x * grid_dims.y * grid_dims.z;
   unsigned int threads_per_block = block_dims.x * block_dims.y * block_dims.z;
+
+  if (total_blocks == 0 || threads_per_block == 0) {
+    detail::set_error(cudaErrorInvalidConfiguration);
+    return;
+  }
 
   parallel_for_blocks(total_blocks, [&](unsigned int linear_block_id) {
     //
@@ -378,7 +481,15 @@ void launch_cooperative(KernelFunction f, dim3 grid_dims, dim3 block_dims,
         // get_shared_variable and syncthreads)
         current_thread_block = &context;
 
-        std::apply(f, args_tuple);
+        // capture device-code exceptions as a launch failure. Abort the 
+        // block barrier too. Otherwise a thread that throws before a __syncthreads()
+        // would leave its peers stuck in wait()
+        try {
+            std::apply(f, args_tuple);
+        } catch (...) {
+            detail::set_error(cudaErrorLaunchFailure);
+            block_barrier.abort();
+        }
       });
     }
     // wait for all threads to finish:
