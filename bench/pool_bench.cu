@@ -33,6 +33,18 @@ __global__ void inc_coop(int *a, int n) {
     a[i] = s[t] + 1;
 }
 
+// cooperative kernel with a large block (up to 256 threads)
+// thread-explosion scenario
+__global__ void inc_coop_big(int *a, int n) {
+  __shared__ int s[256];
+  int t = threadIdx.x;
+  int i = blockIdx.x * blockDim.x + t;
+  s[t] = (i < n) ? a[i] : 0;
+  __syncthreads();
+  if (i < n)
+    a[i] = s[t] + 1;
+}
+
 // median of repeated timings keeps scheduling noise from dominating
 static double median(double *v, int m) {
   for (int i = 1; i < m; i++) // tiny insertion sort, m is small
@@ -102,6 +114,20 @@ int main() {
     std::printf("C big_fast %.5f\n", c_ms);
   }
 
-  std::printf("summary A=%.5f B=%.5f C=%.5f (ms/launch)\n", a_ms, b_ms, c_ms);
+  // Scenario D: cooperative launches with large blocks (grid=8, block=256)
+  // thread-per-thread spawns 256 OS threads per block per launch
+  double d_ms;
+  {
+    const int block = 256, grid = 8, n = grid * block;
+    int *d;
+    cudaMalloc((void **)&d, n * sizeof(int));
+    cudaMemset(d, 0, n * sizeof(int));
+    d_ms = per_launch_ms([&] { inc_coop_big<<<grid, block>>>(d, n); }, 10, 3);
+    cudaFree(d);
+    std::printf("D big_block_coop %.5f\n", d_ms);
+  }
+
+  std::printf("summary A=%.5f B=%.5f C=%.5f D=%.5f (ms/launch)\n", a_ms, b_ms,
+              c_ms, d_ms);
   return 0;
 }
