@@ -15,6 +15,9 @@
 #include <utility>
 #include <vector>
 
+#define MINICORO_IMPL
+#include "minicoro.h"
+
 namespace cucpu {
 
 //! dim3 (grid/block dimension type)
@@ -235,67 +238,73 @@ inline float __saturatef(float x) {
   return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
 }
 
-//! Barrier (for synchronisation)
-// Allows a fixed number of threads to synchronise repeatedly
-// without risking race conditions between consecutive cycles
-class Barrier {
-public:
-  Barrier(unsigned int total_threads)
-      : total_threads_(total_threads), threads_remaining_(total_threads),
-        generation_(0) {}
+// cooperative fibers
+//  each CUDA thread within a block is a coroutine, every fiber of a block
+//  is multiplexed onto the single pool-worker OS thread that owns that block
+//  __synchthreads is a cooperative yield
+//
+//  a coroutine is only ever created, resumed, and destroyed on a single OS
+//  thread
+inline constexpr size_t kFiberStackSize = 64 * 1024;
+struct FiberBlock {
+  unsigned int count = 0;         // fibers = threads per block
+  std::vector<mco_coro *> fibers; // one coroutine per CUDA thread
+  std::vector<dim3> thread_idx;   // each fiber's threadIdx
+  std::function<void()> body;     // kernel body
+};
 
-  // blocks the calling thread until all expected threads arrive
-  void wait() {
-    std::unique_lock<std::mutex> lock(
-        mutex_); // local lock, gets destroyed upon method return/exit by
-                 // destructor (RAII)
+// the default allocator is calloc, needlessly inefficient here
+// kernel stacks don't need zeroing, so replace with malloc:
+inline void *fiber_alloc(size_t size, void *) { return std::malloc(size); }
+inline void fiber_dealloc(void *ptr, size_t, void *) { return std::free(ptr); }
 
-    // if the block was aborted (e.g., a thread threw), don't block again:
-    if (aborted_)
-      return;
+// coroutine entry: run the block's kernel body once
+// exception is caught inside the coroutine so never crosses a yield boundary
+// device code exception becomes a launch failure
+inline void fiber_entry(mco_coro *co) {
+  FiberBlock *b = static_cast<FiberBlock *>(mco_get_user_data(co));
+  try {
+    b->body();
+  } catch (...) {
+    detail::set_error(cudaErrorLaunchFailure);
+  }
+}
 
-    // get current generation
-    // this lets the local thread know when a new cycle has begun
-    unsigned int current_generation = generation_;
+// run every fiber of a block to completion using round-robin
+// each pass resumes every living fiber once, so all fibers advance by one
+// __syncthreads() phase per pass
+inline void run_fiber_block(FiberBlock &b) {
+  b.fibers.resize(b.count);
+  for (unsigned int i = 0; i < b.count; i++) {
+    mco_desc desc = mco_desc_init(fiber_entry, kFiberStackSize);
+    desc.user_data = &b;
+    desc.alloc_cb = fiber_alloc;
+    desc.dealloc_cb = fiber_dealloc;
+    mco_create(&b.fibers[i], &desc);
+  }
 
-    // the final thread to finish triggers the transition:
-    if (--threads_remaining_ == 0) {
-      // advance to next generation:
-      generation_++;
-
-      // reset counter for next generation:
-      threads_remaining_ = total_threads_;
-
-      // signal all other threads:
-      cv_.notify_all();
-    } else {
-      // wait until last thread notifies, or the block is aborted
-      cv_.wait(lock, [this, current_generation] {
-        return current_generation != generation_ || aborted_;
-      });
+  unsigned int remaining = b.count;
+  while (remaining > 0) {
+    for (unsigned int i = 0; i < b.count; i++) {
+      mco_coro *co = b.fibers[i];
+      if (mco_status(co) == MCO_DEAD) {
+        continue;
+      }
+      threadIdx = b.thread_idx[i];
+      mco_resume(co);
+      if (mco_status(co) == MCO_DEAD) {
+        remaining--;
+      }
     }
   }
 
-  // release every thread waiting on this barrier and make all future
-  // waits return immediately.
-  void abort() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    aborted_ = true;
-    cv_.notify_all();
+  for (unsigned int i = 0; i < b.count; i++) {
+    mco_destroy(b.fibers[i]);
   }
+}
 
-private:
-  const unsigned int total_threads_;
-  unsigned int threads_remaining_;
-  unsigned int generation_;
-  bool aborted_ = false;
-  std::mutex mutex_;
-  std::condition_variable cv_;
-};
-
-//! Per-block context: Barrier + shared block memory
+//! Per-block context: shared block memory
 struct BlockContext {
-  Barrier *barrier = nullptr;
   // guard access to shared memory
   std::mutex shared_mem_mutex;
   // map unique ID to memory addr
@@ -350,13 +359,12 @@ template <class T> T &get_shared_variable(int id) {
   return *p;
 }
 
-// block synchronisation barrier, emulates CUDA's `__syncthreads()`
-// Blocks all threads in the active block until they have all arrived at this
-// point.
+// emulates CUDA's `__syncthreads()`, using a cooperative yield from the running
+// fiber back to the block's scheduler
 inline void syncthreads() {
-  if (current_thread_block && current_thread_block->barrier) {
-    current_thread_block->barrier->wait();
-  }
+  mco_coro *co = mco_running();
+  if (co)
+    mco_yield(co);
 }
 
 //! Persistent worker pool
@@ -539,46 +547,24 @@ void launch_cooperative(KernelFunction f, dim3 grid_dims, dim3 block_dims,
   }
 
   parallel_for_blocks(total_blocks, [&](unsigned int linear_block_id) {
-    //
-    dim3 current_block_idx = lin_to_dim(linear_block_id, grid_dims);
-
-    // allocate block-wide barrier and context on this worker thread's stack:
-    Barrier block_barrier(threads_per_block);
+    // per-block CUDA state
+    // thread local on this worker and are shared by all of the block's fibers
+    // only threadIdx varies per fiber
     BlockContext context;
-    context.barrier = &block_barrier;
-    std::vector<std::thread> block_threads;
-    block_threads.reserve(threads_per_block);
+    current_thread_block = &context;
+    blockIdx = lin_to_dim(linear_block_id, grid_dims);
+    blockDim = block_dims;
+    gridDim = grid_dims;
 
-    // spawn OS thread for every thread in this block:
-    for (unsigned int linear_thread_id = 0;
-         linear_thread_id < threads_per_block; linear_thread_id++) {
-
-      // capture linear_thread_id by VALUE, rest by reference
-      block_threads.emplace_back([&, linear_thread_id] {
-        threadIdx = lin_to_dim(linear_thread_id, block_dims);
-        blockIdx = current_block_idx;
-        blockDim = block_dims;
-        gridDim = grid_dims;
-
-        // link this thread to the shared block context (to allow for
-        // get_shared_variable and syncthreads)
-        current_thread_block = &context;
-
-        // capture device-code exceptions as a launch failure. Abort the
-        // block barrier too. Otherwise a thread that throws before a
-        // __syncthreads() would leave its peers stuck in wait()
-        try {
-          std::apply(f, args_tuple);
-        } catch (...) {
-          detail::set_error(cudaErrorLaunchFailure);
-          block_barrier.abort();
-        }
-      });
+    // build the fibers
+    FiberBlock fb;
+    fb.count = threads_per_block;
+    fb.thread_idx.resize(threads_per_block);
+    for (unsigned int i = 0; i < threads_per_block; i++) {
+      fb.thread_idx[i] = lin_to_dim(i, block_dims);
     }
-    // wait for all threads to finish:
-    for (auto &t : block_threads) {
-      t.join();
-    }
+    fb.body = [&] { std::apply(f, args_tuple); };
+    run_fiber_block(fb);
   });
 }
 
